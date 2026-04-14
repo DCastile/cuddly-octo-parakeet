@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     ws_port: int = 8001
 
     # Agent page URL (public, loaded by Recall's bot)
-    agent_page_url: str = "https://dcastile.github.io/cuddly-octo-parakeet/page/"
+    agent_page_url: str = "https://dcastile.github.io/cuddly-octo-parakeet/"
 
     # Bot
     bot_name: str = "Clawdius"
