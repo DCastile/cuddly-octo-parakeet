@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Clawdius</title>
+  <style>
+    body {
+      margin: 0; background: #1a1a2e; color: #e0e0e0;
+      font-family: system-ui, sans-serif;
+      display: flex; align-items: center; justify-content: center; height: 100vh;
+    }
+    .wrap { text-align: center; }
+    .avatar {
+      width: 120px; height: 120px; border-radius: 50%;
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      margin: 0 auto 1rem; display: flex; align-items: center;
+      justify-content: center; font-size: 3rem;
+    }
+    .avatar.speaking { animation: pulse 1s ease-in-out infinite; }
+    @keyframes pulse {
+      0%,100% { box-shadow: 0 0 0 0 rgba(76,175,80,.4); }
+      50%     { box-shadow: 0 0 0 20px rgba(76,175,80,0); }
+    }
+    #status {
+      font-size: 1.1rem; margin: .5rem 0; padding: .4rem .8rem;
+      border-radius: 6px; background: #16213e; display: inline-block;
+    }
+    h2 { margin: 0 0 .2rem; }
+    .sub { color: #888; margin: 0; font-size: .9rem; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="avatar" id="avatar">🧠</div>
+  <h2>Clawdius</h2>
+  <p class="sub">Minerva Platform Engineer</p>
+  <div id="status">Connecting…</div>
+</div>
+<script>
+/**
+ * Agent page — runs inside Recall.ai's bot headless browser.
+ *
+ * 1. Captures meeting audio (getUserMedia — auto-granted by the bot)
+ * 2. Streams audio to our backend via WebSocket
+ * 3. Receives audio responses and plays them into the meeting
+ *
+ * Query params:
+ *   ws  — backend WebSocket URL  (ws:// or wss://)
+ */
+
+const params  = new URLSearchParams(location.search);
+const WS_URL  = params.get("ws") || "ws://localhost:8001";
+const statusEl = document.getElementById("status");
+const avatarEl = document.getElementById("avatar");
+
+function setStatus(s, t) {
+  statusEl.textContent = t;
+  avatarEl.classList.toggle("speaking", s === "speaking");
+}
+
+// ---- Recall transcript WebSocket (real-time captions from the meeting) ----
+
+function connectRecallTranscript(backendWs) {
+  let ws;
+  try {
+    ws = new WebSocket("wss://meeting-data.bot.recall.ai/api/v1/transcript");
+  } catch { return; }
+
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      const speaker = msg.speaker || "Unknown";
+      const text = msg.data?.transcript || msg.transcript || msg.text || "";
+      if (text.trim() && backendWs.readyState === WebSocket.OPEN) {
+        backendWs.send(JSON.stringify({ type: "transcript", speaker, text, ts: Date.now() / 1000 }));
+      }
+    } catch {}
+  };
+  ws.onclose = () => setTimeout(() => connectRecallTranscript(backendWs), 3000);
+}
+
+// ---- Meeting audio capture & streaming ----
+
+async function streamMeetingAudio(backendWs) {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = new AudioContext({ sampleRate: 16000 });
+    const source = ctx.createMediaStreamSource(stream);
+    const processor = ctx.createScriptProcessor(4096, 1, 1);
+
+    source.connect(processor);
+    processor.connect(ctx.destination);
+
+    processor.onaudioprocess = (e) => {
+      if (backendWs.readyState !== WebSocket.OPEN) return;
+      const pcm = e.inputBuffer.getChannelData(0);
+      // Convert float32 → int16
+      const buf = new ArrayBuffer(pcm.length * 2);
+      const view = new DataView(buf);
+      for (let i = 0; i < pcm.length; i++) {
+        const s = Math.max(-1, Math.min(1, pcm[i]));
+        view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      }
+      backendWs.send(buf);
+    };
+  } catch (err) {
+    console.warn("getUserMedia failed (expected outside bot):", err.message);
+  }
+}
+
+// ---- Backend WebSocket ----
+
+function connectBackend() {
+  const ws = new WebSocket(WS_URL);
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = () => {
+    setStatus("listening", "Listening…");
+    ws.send(JSON.stringify({ type: "init" }));
+    connectRecallTranscript(ws);
+    streamMeetingAudio(ws);
+  };
+
+  ws.onmessage = async (e) => {
+    if (typeof e.data === "string") {
+      const msg = JSON.parse(e.data);
+      if (msg.type === "status") {
+        if (msg.state === "thinking") setStatus("thinking", "Thinking…");
+        else if (msg.state === "speaking") setStatus("speaking", "Speaking…");
+        else if (msg.state === "listening") setStatus("listening", "Listening…");
+      }
+      if (msg.type === "audio") {
+        setStatus("speaking", "Speaking…");
+        const bytes = Uint8Array.from(atob(msg.data), c => c.charCodeAt(0));
+        const blob = new Blob([bytes], { type: "audio/mpeg" });
+        const audio = new Audio(URL.createObjectURL(blob));
+        audio.onended = () => setStatus("listening", "Listening…");
+        try { await audio.play(); } catch { setStatus("listening", "Listening…"); }
+      }
+    }
+  };
+
+  ws.onclose = () => {
+    setStatus("error", "Disconnected — reconnecting…");
+    setTimeout(connectBackend, 3000);
+  };
+}
+
+connectBackend();
+</script>
+</body>
+</html>
